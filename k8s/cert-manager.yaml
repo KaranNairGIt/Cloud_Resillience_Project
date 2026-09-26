@@ -1,0 +1,125 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: resilience-selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: resilience-root-ca
+  namespace: resilience
+spec:
+  isCA: true
+  commonName: resilience-demo-root-ca
+  secretName: resilience-root-ca
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+  issuerRef:
+    name: resilience-selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: resilience-ca
+  namespace: resilience
+spec:
+  ca:
+    secretName: resilience-root-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: peer-portal
+  namespace: resilience
+spec:
+  secretName: resilience-tls-portal
+  commonName: portal
+  dnsNames:
+    - resilience-peer-portal
+    - resilience-peer-portal.resilience
+    - resilience-peer-portal.resilience.svc
+    - resilience-peer-portal.resilience.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [digital signature, key encipherment, server auth, client auth]
+  issuerRef:
+    name: resilience-ca
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: peer-identity
+  namespace: resilience
+spec:
+  secretName: resilience-tls-identity
+  commonName: identity
+  dnsNames:
+    - resilience-peer-identity
+    - resilience-peer-identity.resilience
+    - resilience-peer-identity.resilience.svc
+    - resilience-peer-identity.resilience.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [digital signature, key encipherment, server auth, client auth]
+  issuerRef:
+    name: resilience-ca
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: peer-records
+  namespace: resilience
+spec:
+  secretName: resilience-tls-records
+  commonName: records
+  dnsNames:
+    - resilience-peer-records
+    - resilience-peer-records.resilience
+    - resilience-peer-records.resilience.svc
+    - resilience-peer-records.resilience.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [digital signature, key encipherment, server auth, client auth]
+  issuerRef:
+    name: resilience-ca
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: peer-database
+  namespace: resilience
+spec:
+  secretName: resilience-tls-database
+  commonName: database
+  dnsNames:
+    - resilience-peer-database
+    - resilience-peer-database.resilience
+    - resilience-peer-database.resilience.svc
+    - resilience-peer-database.resilience.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [digital signature, key encipherment, server auth, client auth]
+  issuerRef:
+    name: resilience-ca
+    kind: Issuer
+    group: cert-manager.io

@@ -1,0 +1,440 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: resilience-peer-portal
+  namespace: resilience
+spec:
+  selector:
+    app.kubernetes.io/name: resilience-peer
+    resilience-node: portal
+  ports:
+    - name: mtls-peer
+      port: 8766
+      targetPort: 8766
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resilience-peer-portal
+  namespace: resilience
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: resilience-peer
+      resilience-node: portal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: resilience-peer
+        resilience-node: portal
+    spec:
+      serviceAccountName: resilience-controller
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: peer
+          image: distributed-cyber-resilience:dev
+          imagePullPolicy: Never
+          command: ["python", "-m", "resilience.cli", "peer", "serve"]
+          args: ["--node-id", "portal", "--host", "0.0.0.0", "--port", "8766", "--pki-dir", "/var/run/resilience-pki", "--key-dir", "/var/run/resilience-keys", "--state-dir", "/var/lib/resilience/state"]
+          ports:
+            - name: mtls-peer
+              containerPort: 8766
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: mtls-peer
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: mtls-peer
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: peer-tls
+              mountPath: /var/run/resilience-pki
+              readOnly: true
+            - name: signing-key
+              mountPath: /var/run/resilience-keys/private
+              readOnly: true
+            - name: public-keys
+              mountPath: /var/run/resilience-keys/public
+              readOnly: true
+            - name: replica-state
+              mountPath: /var/lib/resilience/state
+      volumes:
+        - name: peer-tls
+          secret:
+            secretName: resilience-tls-portal
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: portal.crt
+              - key: tls.key
+                path: portal.key
+              - key: ca.crt
+                path: ca.crt
+        - name: signing-key
+          secret:
+            secretName: pbft-signing-portal
+            defaultMode: 0440
+            items:
+              - key: signing-key.pem
+                path: portal.pem
+        - name: public-keys
+          configMap:
+            name: pbft-public-keys
+            defaultMode: 0444
+        - name: replica-state
+          persistentVolumeClaim:
+            claimName: resilience-state-portal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: resilience-peer-identity
+  namespace: resilience
+spec:
+  selector:
+    app.kubernetes.io/name: resilience-peer
+    resilience-node: identity
+  ports:
+    - name: mtls-peer
+      port: 8766
+      targetPort: 8766
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resilience-peer-identity
+  namespace: resilience
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: resilience-peer
+      resilience-node: identity
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: resilience-peer
+        resilience-node: identity
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: peer
+          image: distributed-cyber-resilience:dev
+          imagePullPolicy: Never
+          command: ["python", "-m", "resilience.cli", "peer", "serve"]
+          args: ["--node-id", "identity", "--host", "0.0.0.0", "--port", "8766", "--pki-dir", "/var/run/resilience-pki", "--key-dir", "/var/run/resilience-keys", "--state-dir", "/var/lib/resilience/state"]
+          ports:
+            - name: mtls-peer
+              containerPort: 8766
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: mtls-peer
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: mtls-peer
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: peer-tls
+              mountPath: /var/run/resilience-pki
+              readOnly: true
+            - name: signing-key
+              mountPath: /var/run/resilience-keys/private
+              readOnly: true
+            - name: public-keys
+              mountPath: /var/run/resilience-keys/public
+              readOnly: true
+            - name: replica-state
+              mountPath: /var/lib/resilience/state
+      volumes:
+        - name: peer-tls
+          secret:
+            secretName: resilience-tls-identity
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: identity.crt
+              - key: tls.key
+                path: identity.key
+              - key: ca.crt
+                path: ca.crt
+        - name: signing-key
+          secret:
+            secretName: pbft-signing-identity
+            defaultMode: 0440
+            items:
+              - key: signing-key.pem
+                path: identity.pem
+        - name: public-keys
+          configMap:
+            name: pbft-public-keys
+            defaultMode: 0444
+        - name: replica-state
+          persistentVolumeClaim:
+            claimName: resilience-state-identity
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: resilience-peer-records
+  namespace: resilience
+spec:
+  selector:
+    app.kubernetes.io/name: resilience-peer
+    resilience-node: records
+  ports:
+    - name: mtls-peer
+      port: 8766
+      targetPort: 8766
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resilience-peer-records
+  namespace: resilience
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: resilience-peer
+      resilience-node: records
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: resilience-peer
+        resilience-node: records
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: peer
+          image: distributed-cyber-resilience:dev
+          imagePullPolicy: Never
+          command: ["python", "-m", "resilience.cli", "peer", "serve"]
+          args: ["--node-id", "records", "--host", "0.0.0.0", "--port", "8766", "--pki-dir", "/var/run/resilience-pki", "--key-dir", "/var/run/resilience-keys", "--state-dir", "/var/lib/resilience/state"]
+          ports:
+            - name: mtls-peer
+              containerPort: 8766
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: mtls-peer
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: mtls-peer
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: peer-tls
+              mountPath: /var/run/resilience-pki
+              readOnly: true
+            - name: signing-key
+              mountPath: /var/run/resilience-keys/private
+              readOnly: true
+            - name: public-keys
+              mountPath: /var/run/resilience-keys/public
+              readOnly: true
+            - name: replica-state
+              mountPath: /var/lib/resilience/state
+      volumes:
+        - name: peer-tls
+          secret:
+            secretName: resilience-tls-records
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: records.crt
+              - key: tls.key
+                path: records.key
+              - key: ca.crt
+                path: ca.crt
+        - name: signing-key
+          secret:
+            secretName: pbft-signing-records
+            defaultMode: 0440
+            items:
+              - key: signing-key.pem
+                path: records.pem
+        - name: public-keys
+          configMap:
+            name: pbft-public-keys
+            defaultMode: 0444
+        - name: replica-state
+          persistentVolumeClaim:
+            claimName: resilience-state-records
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: resilience-peer-database
+  namespace: resilience
+spec:
+  selector:
+    app.kubernetes.io/name: resilience-peer
+    resilience-node: database
+  ports:
+    - name: mtls-peer
+      port: 8766
+      targetPort: 8766
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resilience-peer-database
+  namespace: resilience
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: resilience-peer
+      resilience-node: database
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: resilience-peer
+        resilience-node: database
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: peer
+          image: distributed-cyber-resilience:dev
+          imagePullPolicy: Never
+          command: ["python", "-m", "resilience.cli", "peer", "serve"]
+          args: ["--node-id", "database", "--host", "0.0.0.0", "--port", "8766", "--pki-dir", "/var/run/resilience-pki", "--key-dir", "/var/run/resilience-keys", "--state-dir", "/var/lib/resilience/state"]
+          ports:
+            - name: mtls-peer
+              containerPort: 8766
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: mtls-peer
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: mtls-peer
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: peer-tls
+              mountPath: /var/run/resilience-pki
+              readOnly: true
+            - name: signing-key
+              mountPath: /var/run/resilience-keys/private
+              readOnly: true
+            - name: public-keys
+              mountPath: /var/run/resilience-keys/public
+              readOnly: true
+            - name: replica-state
+              mountPath: /var/lib/resilience/state
+      volumes:
+        - name: peer-tls
+          secret:
+            secretName: resilience-tls-database
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: database.crt
+              - key: tls.key
+                path: database.key
+              - key: ca.crt
+                path: ca.crt
+        - name: signing-key
+          secret:
+            secretName: pbft-signing-database
+            defaultMode: 0440
+            items:
+              - key: signing-key.pem
+                path: database.pem
+        - name: public-keys
+          configMap:
+            name: pbft-public-keys
+            defaultMode: 0444
+        - name: replica-state
+          persistentVolumeClaim:
+            claimName: resilience-state-database

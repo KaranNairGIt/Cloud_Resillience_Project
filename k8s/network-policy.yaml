@@ -1,0 +1,112 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: resilience-default-deny
+  namespace: resilience
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-peer-mesh-and-dns
+  namespace: resilience
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: resilience-peer
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: resilience-peer
+      ports:
+        - protocol: TCP
+          port: 8766
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: resilience-peer
+      ports:
+        - protocol: TCP
+          port: 8766
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-portal-resilience-controller
+  namespace: resilience
+spec:
+  podSelector:
+    matchLabels:
+      resilience-node: portal
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: resilience-lab
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: resilience-demo-records
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: resilience-lab-default-deny
+  namespace: resilience-lab
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: resilience-demo-access
+  namespace: resilience-lab
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: resilience-demo-records
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: resilience
+          podSelector:
+            matchLabels:
+              resilience-node: portal
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress: []

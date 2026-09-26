@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+secrets/
+data/private/
+/data/raw/
+/data/clinical.db
+/data/clinical.building
+work/
+*.pem
+*.key

@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: resilience-controller
+  namespace: resilience
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: resilience-demo-responder
+  namespace: resilience-lab
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["resilience-demo-records"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    resourceNames: ["resilience-demo-access"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: resilience-demo-responder
+  namespace: resilience-lab
+subjects:
+  - kind: ServiceAccount
+    name: resilience-controller
+    namespace: resilience
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: resilience-demo-responder
