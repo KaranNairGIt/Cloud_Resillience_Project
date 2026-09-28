@@ -37,3 +37,25 @@ Single-sensor scenario results from `experiment`: the distributed model has 0% f
 - Byzantine replicas only withhold or refuse. Equivocation is not modeled beyond the assumption that k >= 2f+1 attackers can commit on their own (PBFT gives no guarantee beyond f).
 - The compromised set always includes the initial primary (worst case for liveness).
 - Not yet run on a real cluster; see `docs/KUBERNETES.md`.
+
+## Dashboard and Prometheus/Grafana
+
+`python -m resilience.cli serve` now also exposes, all read-only and loopback-only:
+
+- `/` gains a baseline-vs-distributed table and the n = 4 boundary table.
+- `/api/comparison` returns the experiment and boundary results as JSON (computed once per server run).
+- `/metrics` is a Prometheus text endpoint: per-node trust and availability, incident and false-isolation counters, and the latest incident's detect / isolate / recover / trust-recovery ticks.
+
+Prometheus scrape config (run Prometheus on the same machine, since the server binds to 127.0.0.1 only):
+
+```yaml
+scrape_configs:
+  - job_name: resilience
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["127.0.0.1:8765"]
+```
+
+Grafana then reads Prometheus as a normal data source. A trust-over-time panel is `resilience_node_trust`. The server holds state in memory, so counters reset on restart.
+
+Reading the comparison table: "availability" measures service uptime only. A centralized controller that is blocked shows 100% availability because nothing was isolated, but the attack was never contained, so read it together with the missed-containment column.

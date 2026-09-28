@@ -811,6 +811,39 @@ class SimulatorTests(unittest.TestCase):
         self.assertEqual(report["results"][0]["distributed"]["containment_rate_percent"], 100)
         self.assertEqual(report["results"][1]["centralized"]["false_isolations"], 2)
 
+    def test_dashboard_metrics_and_comparison_endpoints_are_read_only(self):
+        import threading, urllib.request
+        from http.server import ThreadingHTTPServer
+        from resilience.dashboard import make_handler
+        simulator = ResilienceSimulator()
+        simulator.run("genuine-compromise")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(simulator))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urllib.request.urlopen(base + "/metrics", timeout=10) as reply:
+                text = reply.read().decode()
+                self.assertIn("text/plain", reply.headers["Content-Type"])
+            self.assertIn('resilience_node_trust{node=', text)
+            self.assertIn("resilience_incidents_total 1", text)
+            self.assertIn("resilience_false_isolations_total 0", text)
+            with urllib.request.urlopen(base + "/api/comparison", timeout=30) as reply:
+                data = json.loads(reply.read())
+            self.assertEqual(len(data["experiment"]["results"]), 5)
+            self.assertEqual(data["boundary"]["sweeps"][0]["n"], 4)
+            with urllib.request.urlopen(base + "/", timeout=10) as reply:
+                page = reply.read().decode()
+            self.assertIn('id="comparison"', page)
+            self.assertIn('id="boundary"', page)
+            request = urllib.request.Request(base + "/metrics", data=b"{}", method="POST")
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request, timeout=10)
+            self.assertEqual(caught.exception.code, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_health_summary_releases_database_handle(self):
         import tempfile
         from unittest import mock
