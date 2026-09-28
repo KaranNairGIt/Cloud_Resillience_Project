@@ -3,6 +3,8 @@ from http.server import ThreadingHTTPServer
 from threading import Thread
 import http.client
 import json
+from unittest import mock
+import os
 from contextlib import closing
 import sqlite3
 from pathlib import Path
@@ -22,7 +24,7 @@ from resilience.pki_tools import generate_dev_pki
 from resilience.replica import PBFTReplica, ProtocolError
 from resilience.cluster import NetworkPBFTCluster
 from resilience.recovery import RecoveryWorkflow
-from resilience.k8s_recovery import KubernetesRecoveryAdapter, WORKLOAD_NAME, ACCESS_POLICY_NAME
+from resilience.k8s_recovery import KubernetesAPIError, KubernetesRecoveryAdapter, WORKLOAD_NAME, ACCESS_POLICY_NAME
 from resilience import demo_workload
 
 
@@ -418,7 +420,7 @@ class SimulatorTests(unittest.TestCase):
             api=api,
             probe=lambda path: ({"status": "healthy"} if path == "/healthz"
                                 else {"status": "normal", "records": "synthetic-only"}),
-            rollout_timeout=1, poll_interval=0)
+            rollout_timeout=1, poll_interval=0, min_window_interval=0)
         denied = adapter.run(consensus_committed=True, value="CONTAIN", target="identity")
         self.assertFalse(denied["executed"])
         self.assertEqual(api.policy_stages, [])
@@ -439,6 +441,107 @@ class SimulatorTests(unittest.TestCase):
             self.assertEqual(advanced["current_stage"], expected_stage)
         self.assertEqual(advanced["status"], "fully-reintegrated")
         self.assertEqual(api.policy["metadata"]["annotations"]["resilience.demo/stage"], "full")
+
+    @staticmethod
+    def _healthy_probe(path):
+        return ({"status": "healthy"} if path == "/healthz"
+                else {"status": "normal", "records": "synthetic-only"})
+
+    def test_kubernetes_clean_windows_must_be_separated_in_time(self):
+        api = FakeKubernetesAPI()
+        now = [1000.0]
+        adapter = KubernetesRecoveryAdapter(
+            api=api, probe=SimulatorTests._healthy_probe, rollout_timeout=1, poll_interval=0,
+            min_window_interval=30, clock=lambda: now[0])
+        adapter.run(consensus_committed=True, value="CONTAIN", target="records", trust_score=70)
+        annotations = api.policy["metadata"]["annotations"]
+        self.assertIsNone(annotations["resilience.demo/last-window-at"])
+
+        def advance():
+            return adapter.advance_trust_window(
+                consensus_committed=True, value="NOOP", target="records",
+                trust_score=70, healthy_window_committed=True)
+
+        first = advance()
+        self.assertEqual(first["clean_windows"], 1)
+        # A burst of triggers must not count: nothing changes and nothing is locked down.
+        for _ in range(5):
+            burst = advance()
+            self.assertEqual(burst["status"], "window-not-elapsed")
+            self.assertFalse(burst["executed"])
+        self.assertEqual(api.policy["metadata"]["annotations"]["resilience.demo/stage"], "restricted")
+        self.assertEqual(api.policy["metadata"]["annotations"]["resilience.demo/clean-windows"], "1")
+        now[0] += 10
+        self.assertEqual(advance()["seconds_remaining"], 20.0)
+        now[0] += 21
+        promoted = advance()
+        self.assertEqual(promoted["current_stage"], "monitored")
+        # Re-containment wipes the timing state as well as the streak.
+        adapter.run(consensus_committed=True, value="CONTAIN", target="records", trust_score=70)
+        self.assertIsNone(api.policy["metadata"]["annotations"]["resilience.demo/last-window-at"])
+
+    def test_kubernetes_future_window_timestamp_fails_closed(self):
+        api = FakeKubernetesAPI()
+        adapter = KubernetesRecoveryAdapter(
+            api=api, probe=SimulatorTests._healthy_probe, rollout_timeout=1, poll_interval=0,
+            min_window_interval=30, clock=lambda: 1000.0)
+        adapter.run(consensus_committed=True, value="CONTAIN", target="records", trust_score=70)
+        api.policy["metadata"]["annotations"]["resilience.demo/last-window-at"] = "999999.0"
+        result = adapter.advance_trust_window(
+            consensus_committed=True, value="NOOP", target="records",
+            trust_score=70, healthy_window_committed=True)
+        self.assertEqual(result["status"], "quarantined")
+        self.assertFalse(result["available"])
+
+    def test_kubernetes_concurrent_update_is_rejected_without_lockdown(self):
+        class RacingAPI(FakeKubernetesAPI):
+            """Another writer bumps resourceVersion between the adapter's GET and PATCH."""
+            def __init__(self):
+                super().__init__()
+                self.version = 1
+                self.race = False
+
+            def request(self, method, path, payload=None):
+                if path.endswith("/networkpolicies/" + ACCESS_POLICY_NAME):
+                    if method == "GET":
+                        self.policy["metadata"]["resourceVersion"] = str(self.version)
+                        reply = json.loads(json.dumps(self.policy))
+                        if self.race:
+                            self.version += 1  # concurrent writer wins
+                        return reply
+                    sent = payload.get("metadata", {}).get("resourceVersion")
+                    if sent is not None and sent != str(self.version):
+                        raise KubernetesAPIError(409, "Operation cannot be fulfilled: conflict")
+                    self.version += 1
+                return super().request(method, path, payload)
+
+        api = RacingAPI()
+        adapter = KubernetesRecoveryAdapter(
+            api=api, probe=SimulatorTests._healthy_probe, rollout_timeout=1, poll_interval=0,
+            min_window_interval=0)
+        adapter.run(consensus_committed=True, value="CONTAIN", target="records", trust_score=70)
+        stages_before = list(api.policy_stages)
+        api.race = True
+        result = adapter.advance_trust_window(
+            consensus_committed=True, value="NOOP", target="records",
+            trust_score=70, healthy_window_committed=True)
+        self.assertEqual(result["status"], "conflict")
+        self.assertFalse(result["executed"])
+        self.assertEqual(api.policy_stages, stages_before)  # no write, and no quarantine lockdown
+        api.race = False
+        self.assertEqual(adapter.advance_trust_window(
+            consensus_committed=True, value="NOOP", target="records",
+            trust_score=70, healthy_window_committed=True)["clean_windows"], 1)
+
+    def test_kubernetes_interval_configuration_is_validated(self):
+        with self.assertRaises(ValueError):
+            KubernetesRecoveryAdapter(api=FakeKubernetesAPI(), min_window_interval=-1)
+        with mock.patch.dict(os.environ, {"RESILIENCE_MIN_WINDOW_SECONDS": "abc"}):
+            with self.assertRaises(ValueError):
+                KubernetesRecoveryAdapter(api=FakeKubernetesAPI())
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RESILIENCE_MIN_WINDOW_SECONDS", None)
+            self.assertEqual(KubernetesRecoveryAdapter(api=FakeKubernetesAPI()).min_window_interval, 30.0)
 
     def test_kubernetes_recovery_failure_reasserts_quarantine(self):
         api = FakeKubernetesAPI(fail_ready=True)
@@ -606,7 +709,7 @@ class SimulatorTests(unittest.TestCase):
                 api=kube_api,
                 probe=lambda path: ({"status": "healthy"} if path == "/healthz"
                                     else {"status": "normal", "records": "synthetic-only"}),
-                rollout_timeout=1, poll_interval=0)
+                rollout_timeout=1, poll_interval=0, min_window_interval=0)
             initial_restore = kube_adapter.run(
                 consensus_committed=True, value="CONTAIN", target="records", trust_score=55)
             self.assertEqual(initial_restore["status"], "reintegration-pending")

@@ -21,6 +21,12 @@ KNOWN_GOOD_IMAGE = "distributed-cyber-resilience:dev"
 STAGE_TRUST = {"quarantined": 0, "restricted": 45, "monitored": 60,
                "peer-validated": 75, "full": 90}
 SUSTAINED_WINDOWS_PER_STAGE = 2
+# A "sustained" window must span real time: consecutive counted clean windows have to be
+# at least this many seconds apart, or one operator could promote a workload to full
+# access with a rapid burst of triggers. Override with RESILIENCE_MIN_WINDOW_SECONDS.
+DEFAULT_MIN_WINDOW_SECONDS = 30.0
+LAST_WINDOW_ANNOTATION = "resilience.demo/last-window-at"
+CLOCK_SKEW_TOLERANCE_SECONDS = 5.0  # pod restarts can land on a node with a slightly different clock
 STAGE_ORDER = ("quarantined", "restricted", "monitored", "peer-validated", "full")
 
 
@@ -41,6 +47,14 @@ def _known_good_container() -> dict:
         "resources": {"requests": {"cpu": "25m", "memory": "32Mi"},
                       "limits": {"cpu": "200m", "memory": "128Mi"}},
     }
+
+
+class KubernetesAPIError(RuntimeError):
+    """Kubernetes API error that keeps the HTTP status code (409 = write conflict)."""
+
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 class InClusterKubernetesAPI:
@@ -71,7 +85,7 @@ class InClusterKubernetesAPI:
                 return json.loads(content) if content else {}
         except HTTPError as exc:
             detail = exc.read(4096).decode("utf-8", "replace")
-            raise RuntimeError(f"Kubernetes API returned HTTP {exc.code}: {detail}") from exc
+            raise KubernetesAPIError(exc.code, f"Kubernetes API returned HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
             raise RuntimeError(f"Kubernetes API request failed: {exc.reason}") from exc
 
@@ -90,7 +104,19 @@ class KubernetesRecoveryAdapter:
                    f"{ACCESS_POLICY_NAME}")
 
     def __init__(self, api=None, probe: Callable[[str], dict] | None = None,
-                 rollout_timeout: float = 45, poll_interval: float = .5):
+                 rollout_timeout: float = 45, poll_interval: float = .5,
+                 min_window_interval: float | None = None,
+                 clock: Callable[[], float] = time.time):
+        if min_window_interval is None:
+            try:
+                min_window_interval = float(os.environ.get(
+                    "RESILIENCE_MIN_WINDOW_SECONDS", DEFAULT_MIN_WINDOW_SECONDS))
+            except ValueError:
+                raise ValueError("RESILIENCE_MIN_WINDOW_SECONDS must be a number") from None
+        if not 0 <= min_window_interval <= 86400:
+            raise ValueError("min_window_interval must be between 0 and 86400 seconds")
+        self.min_window_interval = float(min_window_interval)
+        self.clock = clock
         self.api = api or InClusterKubernetesAPI()
         self.probe = probe or self._http_probe
         self.rollout_timeout = rollout_timeout
@@ -133,16 +159,21 @@ class KubernetesRecoveryAdapter:
         raise ValueError(f"unsupported workload network stage: {stage}")
 
     def _set_stage(self, stage: str, *, trust_score: float | None = None,
-                   clean_windows: int = 0) -> None:
+                   clean_windows: int = 0, window_at: float | None = None,
+                   resource_version: str | None = None) -> None:
         if stage not in STAGE_TRUST or not 0 <= clean_windows < SUSTAINED_WINDOWS_PER_STAGE:
             raise ValueError("invalid reintegration stage state")
         annotations = {"resilience.demo/stage": stage,
-                       "resilience.demo/clean-windows": str(clean_windows)}
+                       "resilience.demo/clean-windows": str(clean_windows),
+                       # merge-patch null deletes the timestamp unless a window was just counted
+                       LAST_WINDOW_ANNOTATION: None if window_at is None else repr(float(window_at))}
         if trust_score is not None:
             annotations["resilience.demo/trust-score"] = str(round(trust_score, 2))
+        metadata = {"annotations": annotations}
+        if resource_version:
+            metadata["resourceVersion"] = resource_version  # server rejects with 409 if stale
         self.api.request("PATCH", self.POLICY_PATH,
-                         {"metadata": {"annotations": annotations},
-                          "spec": self.stage_rules(stage)})
+                         {"metadata": metadata, "spec": self.stage_rules(stage)})
 
     @staticmethod
     def _trust_input(trust_score: float | None) -> float:
@@ -178,7 +209,15 @@ class KubernetesRecoveryAdapter:
         if set(validation) != set(self.CHECKS) or not all(isinstance(v, bool) for v in validation.values()):
             raise ValueError("validation must provide boolean integrity, health, and behavior results")
         try:
+            now = self.clock()
             policy = self.api.request("GET", self.POLICY_PATH)
+            guard = {"rv": policy.get("metadata", {}).get("resourceVersion")}
+
+            def write(stage_name: str, **kwargs) -> None:
+                # Only the first write of this call is version-guarded; it is the one that
+                # would clobber a concurrent advance, and later writes follow from it.
+                self._set_stage(stage_name, resource_version=guard.pop("rv", None), **kwargs)
+
             annotations = policy.get("metadata", {}).get("annotations", {})
             stage = annotations.get("resilience.demo/stage", "quarantined")
             clean_windows = int(annotations.get("resilience.demo/clean-windows", "0"))
@@ -188,6 +227,18 @@ class KubernetesRecoveryAdapter:
                 return {"executed": False, "status": "fully-reintegrated",
                         "trust_score": score, "current_stage": stage,
                         "actions": ["workload is already at full access"]}
+            last_window = annotations.get(LAST_WINDOW_ANNOTATION)
+            if last_window:
+                elapsed = now - float(last_window)
+                if elapsed < -CLOCK_SKEW_TOLERANCE_SECONDS:
+                    raise RuntimeError("saved clean-window timestamp is in the future")
+                elapsed = max(elapsed, 0.0)
+                if elapsed < self.min_window_interval:
+                    return {"executed": False, "status": "window-not-elapsed",
+                            "current_stage": stage, "clean_windows": clean_windows,
+                            "seconds_remaining": round(self.min_window_interval - elapsed, 1),
+                            "reason": "clean windows must be separated by the minimum monitoring interval",
+                            "actions": []}
             actions = []
             if stage == "quarantined":
                 if score < STAGE_TRUST["restricted"]:
@@ -198,7 +249,7 @@ class KubernetesRecoveryAdapter:
                 # The only ingress opened at this point is from the portal monitor.
                 stage = "restricted"
                 clean_windows = 0
-                self._set_stage(stage, trust_score=score, clean_windows=clean_windows)
+                write(stage, trust_score=score, clean_windows=clean_windows)
                 actions.append("opened portal-only restricted access for recovery checks")
 
             actual_checks = self._actual_checks()
@@ -206,7 +257,7 @@ class KubernetesRecoveryAdapter:
                             if not validation[name] or not actual_checks[name])
             next_stage = STAGE_ORDER[STAGE_ORDER.index(stage) + 1]
             if failed:
-                self._set_stage("restricted", trust_score=score, clean_windows=0)
+                write("restricted", trust_score=score, clean_windows=0)
                 return {"executed": True, "target": target, "namespace": LAB_NAMESPACE,
                         "status": "restricted-validation-failed", "available": True,
                         "current_stage": "restricted", "trust_score": score,
@@ -215,17 +266,16 @@ class KubernetesRecoveryAdapter:
                         "failed_checks": failed, "reintegration_stages": ["restricted"],
                         "actions": actions + ["validation failed; access reset to portal-only restricted stage"]}
 
-            if score < STAGE_TRUST[next_stage]:
-                clean_windows = 0
-            else:
-                clean_windows += 1
+            counted = score >= STAGE_TRUST[next_stage]
+            clean_windows = clean_windows + 1 if counted else 0
+            window_at = now if counted else None
             if clean_windows >= SUSTAINED_WINDOWS_PER_STAGE:
                 stage = next_stage
                 clean_windows = 0
-                self._set_stage(stage, trust_score=score, clean_windows=clean_windows)
+                write(stage, trust_score=score, clean_windows=clean_windows, window_at=window_at)
                 actions.append(f"two clean windows and trust threshold promoted access to {stage}")
             else:
-                self._set_stage(stage, trust_score=score, clean_windows=clean_windows)
+                write(stage, trust_score=score, clean_windows=clean_windows, window_at=window_at)
                 actions.append(f"recorded clean trust window {clean_windows}/{SUSTAINED_WINDOWS_PER_STAGE} for {next_stage}")
             return {"executed": True, "target": target, "namespace": LAB_NAMESPACE,
                     "status": "fully-reintegrated" if stage == "full" else "reintegration-pending",
@@ -237,15 +287,25 @@ class KubernetesRecoveryAdapter:
                     "validation": actual_checks, "failed_checks": [],
                     "reintegration_stages": [stage], "actions": actions,
                     "network_policy_scope": ACCESS_POLICY_NAME}
+        except KubernetesAPIError as exc:
+            if exc.code == 409:  # our version-guarded write lost a race; nothing was changed
+                return {"executed": False, "status": "conflict",
+                        "reason": "another update changed the access policy first; retry the window",
+                        "actions": []}
+            return self._advance_failure(target, score, exc)
         except Exception as exc:
-            try:
-                self._set_stage("quarantined", trust_score=score, clean_windows=0)
-                lockdown = "deny-all policy reasserted"
-            except Exception as lockdown_error:
-                lockdown = f"deny-all reassertion failed: {lockdown_error}"
-            return {"executed": True, "target": target, "namespace": LAB_NAMESPACE,
-                    "status": "quarantined", "available": False,
-                    "trust_score": score, "error": str(exc), "actions": [lockdown]}
+            return self._advance_failure(target, score, exc)
+
+    def _advance_failure(self, target: str, score: float, exc: Exception) -> dict:
+        """Fail closed: any unexpected error re-asserts the deny-all policy."""
+        try:
+            self._set_stage("quarantined", trust_score=score, clean_windows=0)
+            lockdown = "deny-all policy reasserted"
+        except Exception as lockdown_error:
+            lockdown = f"deny-all reassertion failed: {lockdown_error}"
+        return {"executed": True, "target": target, "namespace": LAB_NAMESPACE,
+                "status": "quarantined", "available": False,
+                "trust_score": score, "error": str(exc), "actions": [lockdown]}
 
     @staticmethod
     def _http_probe(path: str) -> dict:
