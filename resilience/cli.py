@@ -7,6 +7,7 @@ import time
 
 from .engine import ResilienceSimulator
 from .experiments import SCENARIOS, run_experiment
+from .boundary import run_boundary_sweep, DEFAULT_SIZES
 from .dashboard import serve
 from .dataset import download_dataset
 from .health_records import import_public_encounters, health_summary
@@ -27,6 +28,9 @@ def main() -> None:
     experiment = commands.add_parser("experiment", help="compare distributed and centralized models")
     experiment.add_argument("--repeats", type=int, default=3)
     experiment.add_argument("--scenario", choices=SCENARIOS, action="append")
+    boundary = commands.add_parser("boundary", help="sweep compromised-node counts to find the fault-tolerance boundary")
+    boundary.add_argument("--sizes", type=int, nargs="+", default=list(DEFAULT_SIZES),
+                          help="committee sizes n to sweep (default: 4 7 10)")
     dashboard = commands.add_parser("serve", help="serve the loopback-only read-only dashboard")
     dashboard.add_argument("--port", type=int, default=8765)
     trigger = commands.add_parser("trigger", help="send a safe synthetic scenario to the local dashboard server")
@@ -170,6 +174,8 @@ def main() -> None:
             raise SystemExit(f"Cannot reach local simulator at 127.0.0.1:{args.port}: {exc}") from exc
         finally:
             connection.close()
+    elif args.command == "boundary":
+        result = run_boundary_sweep(tuple(args.sizes))
     elif args.command == "experiment":
         result = run_experiment(args.repeats, tuple(args.scenario) if args.scenario else SCENARIOS)
     else:

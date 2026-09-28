@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from statistics import mean
 
+from .baseline import CentralizedController
 from .engine import ResilienceSimulator
 
 
@@ -11,41 +12,16 @@ SCENARIOS = ("genuine-compromise", "false-evidence", "silent-node", "block-vote"
             "two-compromised")
 
 
-def centralized_baseline(scenario: str) -> dict:
-    """Model one controller; scenarios are abstractions, not real measurements."""
-    outcomes = {
-        "genuine-compromise": ("contain", 0, 1, 2, 4, 75.0,
-                               "controller detects and restores the synthetic workload"),
-        "false-evidence": ("contain", 1, 1, 2, None, 50.0,
-                           "single high-confidence accusation causes false isolation"),
-        "silent-node": ("contain", 0, 2, 3, 5, 75.0,
-                        "controller uses remaining synthetic observations"),
-        "block-vote": ("withhold", 0, 1, None, None, 100.0,
-                       "compromised central controller blocks the legitimate response"),
-        "two-compromised": ("contain", 0, 1, 2, 4, 75.0,
-                            "central baseline has no peer-agent quorum to compromise"),
-    }
-    if scenario not in outcomes:
+def centralized_baseline(scenario: str, controller_mode: str = "none",
+                         tainted_restore: bool = False) -> dict:
+    """Run the executable single-controller baseline (see baseline.py)."""
+    if scenario not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario}")
-    decision, false_isolations, detect, isolate, recover, availability, note = outcomes[scenario]
-    return {
-        "architecture": "centralized",
-        "scenario": scenario,
-        "decision": decision,
-        "metrics": {
-            "time_to_detect_seconds": detect,
-            "time_to_isolate_seconds": isolate,
-            "recovery_time_seconds": recover,
-            "false_isolations": false_isolations,
-            "availability_percent": availability,
-        },
-        "events": [note],
-        "measurement_note": "illustrative model values; not wall-clock measurements",
-    }
+    return CentralizedController(controller_mode).run(scenario, tainted_restore)
 
 
 def _average(reports: list[dict], key: str) -> float | None:
-    values = [r["metrics"][key] for r in reports if r["metrics"][key] is not None]
+    values = [r["metrics"].get(key) for r in reports if r["metrics"].get(key) is not None]
     return round(mean(values), 2) if values else None
 
 
@@ -69,6 +45,9 @@ def run_experiment(repeats: int = 3, scenarios: tuple[str, ...] = SCENARIOS) -> 
                 "mean_recovery_time_seconds": _average(runs, "recovery_time_seconds"),
                 "false_isolations": sum(r["metrics"]["false_isolations"] for r in runs),
                 "mean_availability_percent": _average(runs, "availability_percent"),
+                "false_isolation_rate_percent": round(100 * sum(bool(r["metrics"]["false_isolation"]) for r in runs) / repeats, 1),
+                "missed_containment_rate_percent": round(100 * sum(bool(r["metrics"]["missed_containment"]) for r in runs) / repeats, 1),
+                "mean_trust_recovery_time_ticks": _average(runs, "trust_recovery_time_ticks"),
             }
         results.append({
             "scenario": scenario,
@@ -81,8 +60,8 @@ def run_experiment(repeats: int = 3, scenarios: tuple[str, ...] = SCENARIOS) -> 
         "repeats": repeats,
         "results": results,
         "limitations": [
-            "All inputs and timing values are synthetic model values, not measurements on a deployed system.",
-            "The centralized baseline is a simplified illustrative comparator, not an implementation of a production controller.",
-            "The two-compromised case exceeds the distributed model's one-fault tolerance; its centralized comparator has no peer-agent attack surface.",
+            "All inputs and timing values are synthetic model ticks, not measurements on a deployed system.",
+            "The centralized baseline is an executed but deliberately minimal single controller, not a production controller.",
+            "Scenarios attack one sensor agent (or the controller itself for block-vote); use the `boundary` command to compromise the controller under every failure mode.",
         ],
     }

@@ -261,6 +261,7 @@ class SimulatorTests(unittest.TestCase):
 
     def test_checkpoint_transfer_requires_commit_certificate_and_survives_restart(self):
         root = Path(__file__).resolve().parent.parent
+        (root / "work").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=root / "work", prefix="checkpoint-test-") as temp_dir:
             nodes = ["portal", "identity", "records", "database"]
             ring = NodeKeyring.generate(nodes)
@@ -808,6 +809,47 @@ class SimulatorTests(unittest.TestCase):
         self.assertEqual(len(report["results"]), 2)
         self.assertEqual(report["results"][0]["distributed"]["containment_rate_percent"], 100)
         self.assertEqual(report["results"][1]["centralized"]["false_isolations"], 2)
+
+    def test_centralized_baseline_is_executed_not_tabulated(self):
+        from resilience.baseline import CentralizedController
+        self.assertTrue(CentralizedController().run("false-evidence")["metrics"]["false_isolation"])
+        blocked = CentralizedController("block").run("genuine-compromise")
+        self.assertEqual(blocked["decision"], "withhold")
+        self.assertTrue(blocked["metrics"]["missed_containment"])
+        with self.assertRaises(ValueError):
+            CentralizedController("bogus")
+
+    def test_distributed_false_isolation_and_tainted_restore_metrics(self):
+        report = ResilienceSimulator().run("false-evidence")
+        self.assertFalse(report["metrics"]["false_isolation"])
+        tainted = ResilienceSimulator().run("genuine-compromise", tainted_restore=True)
+        self.assertFalse(tainted["metrics"]["recovery_success"])
+        self.assertFalse(tainted["metrics"]["false_reintegration"])
+        self.assertEqual(tainted["metrics"]["target_stage"], "quarantine")
+
+    def test_boundary_sweep_matches_bft_theory_and_never_fails_within_f(self):
+        from resilience.boundary import run_boundary_sweep
+        report = run_boundary_sweep((4, 7))
+        for sweep in report["sweeps"]:
+            for name, attack in sweep["attacks"].items():
+                for cell in attack["cells"]:
+                    if cell["k"] <= sweep["f"]:
+                        self.assertTrue(cell["correct"], (sweep["n"], name, cell))
+                if name in ("silent", "block"):
+                    self.assertEqual(attack["first_failing_k"], sweep["f"] + 1)
+                else:  # safety: colluders need a full 2f+1 quorum to force a false isolation
+                    self.assertEqual(attack["first_failing_k"], 2 * sweep["f"] + 1)
+        self.assertTrue(all(not row["correct"] for row in report["centralized_controller_compromised"]))
+        integrity = report["reintegration_integrity"]
+        self.assertFalse(integrity["distributed"]["false_reintegration"])
+        self.assertTrue(integrity["centralized_compromised_controller"]["false_reintegration"])
+
+    def test_boundary_sweep_rejects_bad_sizes(self):
+        from resilience.boundary import run_boundary_sweep, run_cell
+        with self.assertRaises(ValueError):
+            run_boundary_sweep((3,))
+        with self.assertRaises(ValueError):
+            run_cell(4, 1, "nonsense")
 
     def test_experiment_repeat_count_is_bounded(self):
         with self.assertRaises(ValueError):

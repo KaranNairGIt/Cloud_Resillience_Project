@@ -25,6 +25,7 @@ MIN_CORROBORATING_REPORTERS = 2 * MAX_BYZANTINE_FAULTS + 1
 MIN_DISTINCT_EVIDENCE_TYPES = 2
 MIN_EVIDENCE_SCORE = 0.60
 EVIDENCE_TYPE_WEIGHTS = {name: 1.0 for name in EVIDENCE_TYPES}
+BENIGN_SCENARIOS = frozenset({"false-evidence", "healthy-window"})  # target is actually healthy
 STAGES = ("quarantine", "restricted", "monitored", "peer-validated", "full")
 STAGE_TRUST = {"quarantine": 0, "restricted": 45, "monitored": 60,
                "peer-validated": 75, "full": 90}
@@ -81,6 +82,8 @@ class Incident:
     consensus_result: dict | None = None
     trust_trajectory: list[dict] = field(default_factory=list)
     trust_updates: list[dict] = field(default_factory=list)
+    recovery_success: bool | None = None
+    false_reintegration: bool = False
 
 
 class ResilienceSimulator:
@@ -224,7 +227,7 @@ class ResilienceSimulator:
             incident.evidence.append(self._emit(origin, incident.target,
                                                 OBSERVATION_BY_ORIGIN[origin], confidence))
 
-    def run(self, scenario: str = "genuine-compromise") -> dict:
+    def run(self, scenario: str = "genuine-compromise", tainted_restore: bool = False) -> dict:
         allowed = {"genuine-compromise", "false-evidence", "silent-node", "block-vote",
                    "two-compromised", "healthy-window"}
         if scenario not in allowed:
@@ -281,6 +284,10 @@ class ResilienceSimulator:
         approved = (evidence_authorizes_containment and protocol.committed
                     and protocol.value == "CONTAIN")
         incident.decision = "contain" if approved else "withhold"
+        # Ground truth: containing a target that is actually healthy is a false isolation.
+        incident.false_isolation = approved and scenario in BENIGN_SCENARIOS
+        if incident.false_isolation:
+            self.false_isolations += 1
         sampled_availability = False
         if approved:
             incident.isolate_seconds = 2
@@ -325,19 +332,30 @@ class ResilienceSimulator:
         if approved:
             # Deterministic restore from the simulated known-good snapshot.
             self.tick += 2
-            self.nodes[target].available = True
-            self._record_availability()
-            incident.recover_seconds = 4
-            incident.events.append("restored simulated known-good workload snapshot")
-            incident.events.append("post-restore integrity and behavior validation passed")
             node = self.nodes[target]
-            node.stage = "restricted"
-            node.trust = max(node.trust, 50)
-            node.trust_since = self.tick
-            # Six clean monitoring windows demonstrate that promotion requires
-            # repeated evidence at every stage, not just a single health check.
-            self._advance_trust_recovery(node, incident, healthy_windows=6)
-            incident.events.append(f"reintegrated at {node.stage} stage (trust {node.trust:.0f})")
+            if tainted_restore:
+                # Post-restore validation catches a still-compromised workload:
+                # it stays quarantined and is never reintegrated.
+                incident.recovery_success = False
+                node.available = False
+                node.stage = "quarantine"
+                self._record_availability()
+                incident.events.append("restored workload failed post-restore integrity validation")
+                incident.events.append(f"{target} kept in quarantine; reintegration refused")
+            else:
+                node.available = True
+                self._record_availability()
+                incident.recover_seconds = 4
+                incident.recovery_success = True
+                incident.events.append("restored simulated known-good workload snapshot")
+                incident.events.append("post-restore integrity and behavior validation passed")
+                node.stage = "restricted"
+                node.trust = max(node.trust, 50)
+                node.trust_since = self.tick
+                # Six clean monitoring windows demonstrate that promotion requires
+                # repeated evidence at every stage, not just a single health check.
+                self._advance_trust_recovery(node, incident, healthy_windows=6)
+                incident.events.append(f"reintegrated at {node.stage} stage (trust {node.trust:.0f})")
         if scenario == "two-compromised" and not approved:
             incident.events.append("expected boundary: two compromised agents exceed this 4-node model's f=1 tolerance")
         incident.events.extend(protocol.events)
@@ -377,6 +395,11 @@ class ResilienceSimulator:
                 "time_to_isolate_seconds": chosen.isolate_seconds if chosen else None,
                 "recovery_time_seconds": chosen.recover_seconds if chosen else None,
                 "false_isolations": sum(i.false_isolation for i in self.incidents),
+                "false_isolation": bool(chosen and chosen.false_isolation),
+                "recovery_success": chosen.recovery_success if chosen else None,
+                "false_reintegration": bool(chosen and chosen.false_reintegration),
+                "missed_containment": bool(chosen and chosen.scenario not in BENIGN_SCENARIOS
+                                           and chosen.decision != "contain"),
                 "availability_percent": round(100 * self.available_samples / max(1, self.availability_samples * len(self.nodes)), 1),
                 "target_trust": round(self.nodes[chosen.target].trust, 1) if chosen else None,
                 "target_stage": self.nodes[chosen.target].stage if chosen else None,
