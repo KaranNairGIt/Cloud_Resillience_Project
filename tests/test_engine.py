@@ -3,6 +3,7 @@ from http.server import ThreadingHTTPServer
 from threading import Thread
 import http.client
 import json
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 import ssl
@@ -810,6 +811,42 @@ class SimulatorTests(unittest.TestCase):
         self.assertEqual(report["results"][0]["distributed"]["containment_rate_percent"], 100)
         self.assertEqual(report["results"][1]["centralized"]["false_isolations"], 2)
 
+    def test_health_summary_releases_database_handle(self):
+        import tempfile
+        from unittest import mock
+        from resilience import health_records
+        opened = []
+
+        class Tracked:
+            """Proxy that records whether close() was called on the real connection."""
+            def __init__(self, real):
+                self._real, self.closed = real, False
+                opened.append(self)
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return self._real.__exit__(*exc)
+            def close(self):
+                self.closed = True
+                self._real.close()
+
+        real_connect = sqlite3.connect
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = health_records.database_path(root)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(real_connect(path)) as db:
+                db.execute("CREATE TABLE encounters (demo_id TEXT, readmitted TEXT, age TEXT)")
+                db.execute("INSERT INTO encounters VALUES ('a','NO','[70-80)')")
+                db.commit()
+            with mock.patch.object(health_records.sqlite3, "connect",
+                                   side_effect=lambda *a, **k: Tracked(real_connect(*a, **k))):
+                self.assertEqual(health_records.health_summary(root)["encounters"], 1)
+            self.assertTrue(opened)
+            self.assertTrue(all(handle.closed for handle in opened))
+
     def test_dev_pki_passes_strict_x509_verification(self):
         import ssl, tempfile
         from resilience.pki_tools import generate_dev_pki
@@ -910,7 +947,7 @@ class SimulatorTests(unittest.TestCase):
         if not summary["loaded"]:
             self.skipTest("Fetch and import the public UCI dataset first")
         self.assertEqual(summary["encounters"], 101766)
-        with sqlite3.connect(database_path()) as db:
+        with closing(sqlite3.connect(database_path())) as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(encounters)")}
         self.assertNotIn("patient_nbr", columns)
         self.assertNotIn("encounter_id", columns)

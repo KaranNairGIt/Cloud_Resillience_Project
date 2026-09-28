@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import uuid
@@ -74,7 +75,8 @@ def health_summary(project_root: Path | None = None) -> dict:
     if not db_path.is_file():
         return {"loaded": False, "encounters": 0, "readmission": {}}
     uri = f"file:{db_path.resolve().as_posix()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as db:
+    # closing() releases the file handle; `with connect()` alone only ends the transaction.
+    with closing(sqlite3.connect(uri, uri=True)) as db:
         count = db.execute("SELECT COUNT(*) FROM encounters").fetchone()[0]
         readmission = dict(db.execute(
             "SELECT readmitted, COUNT(*) FROM encounters GROUP BY readmitted ORDER BY readmitted"
