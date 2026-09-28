@@ -810,6 +810,31 @@ class SimulatorTests(unittest.TestCase):
         self.assertEqual(report["results"][0]["distributed"]["containment_rate_percent"], 100)
         self.assertEqual(report["results"][1]["centralized"]["false_isolations"], 2)
 
+    def test_dev_pki_passes_strict_x509_verification(self):
+        import ssl, tempfile
+        from resilience.pki_tools import generate_dev_pki
+        with tempfile.TemporaryDirectory() as temp_dir:
+            generate_dev_pki(Path(temp_dir))
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.load_verify_locations(str(Path(temp_dir) / "ca.crt"))
+            context.verify_flags |= ssl.VERIFY_X509_STRICT  # default on Python 3.13+
+            server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server.load_cert_chain(str(Path(temp_dir) / "portal.crt"), str(Path(temp_dir) / "portal.key"))
+            import socket, threading
+            listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(1)
+            def accept():
+                try:
+                    conn, _ = listener.accept()
+                    with server.wrap_socket(conn, server_side=True):
+                        pass
+                except (ssl.SSLError, OSError):
+                    pass
+            thread = threading.Thread(target=accept, daemon=True); thread.start()
+            with socket.create_connection(listener.getsockname(), timeout=5) as raw:
+                with context.wrap_socket(raw, server_hostname="localhost") as tls:
+                    self.assertTrue(tls.version())
+            thread.join(5); listener.close()
+
     def test_centralized_baseline_is_executed_not_tabulated(self):
         from resilience.baseline import CentralizedController
         self.assertTrue(CentralizedController().run("false-evidence")["metrics"]["false_isolation"])

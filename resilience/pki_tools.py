@@ -29,6 +29,7 @@ def generate_dev_pki(directory: Path, *, force: bool = False) -> dict:
                .not_valid_before(now - timedelta(minutes=1))
                .not_valid_after(now + timedelta(days=365))
                .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+               .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
                .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False,
                                             key_encipherment=False, data_encipherment=False,
                                             key_agreement=False, key_cert_sign=True,
@@ -52,6 +53,9 @@ def generate_dev_pki(directory: Path, *, force: bool = False) -> dict:
                 .not_valid_before(now - timedelta(minutes=1))
                 .not_valid_after(now + timedelta(days=90))
                 .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                # Python 3.13+ enables strict X.509 verification, which requires these identifiers.
+                .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+                .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
                 .add_extension(x509.SubjectAlternativeName(sans), critical=False)
                 .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH,
                                                       ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
