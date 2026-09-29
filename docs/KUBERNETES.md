@@ -9,6 +9,8 @@ The manifests deploy four independent mTLS PBFT-style replicas and a separate sy
 - A CNI plugin that enforces Kubernetes NetworkPolicy. A default Minikube install uses Kindnet and does not enforce policies; the commands below choose Calico.
 - A default StorageClass for the four 128Mi peer-state claims (`kubectl get storageclass`). Each peer needs its own volume.
 
+`docs/runbook.ps1` walks every step below plus the live-validate run in one file, meant to be run block by block rather than all at once.
+
 Before applying the portal egress policy, check the Kubernetes API Service address:
 
 ```powershell
