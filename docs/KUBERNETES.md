@@ -97,6 +97,20 @@ minikube stop
 
 To start the cluster again use `minikube start`, then inspect pod readiness with `kubectl get pods -n resilience`.
 
+## Live validation (real wall-clock measurements)
+
+Everything above drives the cluster by hand. Once every peer and the demo workload are Ready, `python -m resilience.cli live-validate` runs the same operations end to end from your machine and times them for real — this is what turns the "modeled ticks" in `docs/EXPERIMENTS.md` into a measured result, per the PDF's Section 7 experimental protocol.
+
+```powershell
+python -m resilience.cli live-validate
+```
+
+It: checks `kubectl`/`minikube` are installed, the cluster is reachable, all four peers and the demo workload are Ready, the access policy exists, and warns (without stopping) if no policy-enforcing CNI is detected; runs the five scenarios through `cluster simulate` and checks each against the BFT expectation for n = 4, f = 1; runs a genuine-compromise incident with `--apply-kubernetes-response` while polling the NetworkPolicy's stage annotation every 0.25 s, to time isolation and restore; repeats `healthy-window` (respecting the 30-second window spacing) to time the full climb to `full` access; and runs one more incident with `--fail-check health` to confirm a tainted restore is kept out of full access rather than reintegrated.
+
+Skip the multi-minute trust climb during iteration with `--skip-trust-recovery`. Every run writes a timestamped JSON file to `work/live-results/` (override with `--output-dir`) and also prints it to stdout; keep that file, since it's the primary evidence for the report's real-cluster numbers. `status` is `"passed"` only if every scenario matched its expected outcome, the incident recovered, and the tainted restore was correctly refused; `"preflight-failed"` means nothing was touched; anything else is `"completed-with-findings"`, and the JSON says which check failed.
+
+Two things this cannot measure: `time_to_detect` (the scenario injects evidence in-process, so there's no real attack to notice), and the isolate/restore timings include `kubectl exec` process-start overhead alongside the ~0.25 s poll granularity, so treat them as accurate to roughly +/- 0.5 s, not exact.
+
 ## Secret boundary
 
 Kubernetes Secrets are not automatically a production vault. Kubernetes warns that Secrets are stored unencrypted in etcd by default unless encryption at rest is configured, and RBAC must restrict access. A real environment should use an external KMS/HSM or secret manager, least-privilege RBAC, API-server encryption at rest, and audited rotation. cert-manager handles leaf certificate renewal; the demo self-signed root CA is not an appropriate production trust root.

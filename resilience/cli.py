@@ -31,6 +31,12 @@ def main() -> None:
     boundary = commands.add_parser("boundary", help="sweep compromised-node counts to find the fault-tolerance boundary")
     boundary.add_argument("--sizes", type=int, nargs="+", default=list(DEFAULT_SIZES),
                           help="committee sizes n to sweep (default: 4 7 10)")
+    live = commands.add_parser("live-validate",
+                               help="measure real wall-clock timings on a running Minikube deployment")
+    live.add_argument("--skip-trust-recovery", action="store_true",
+                      help="skip the multi-minute clean-window climb to full access")
+    live.add_argument("--output-dir", default="work/live-results",
+                      help="directory for the JSON result file (default: work/live-results)")
     dashboard = commands.add_parser("serve", help="serve the loopback-only read-only dashboard")
     dashboard.add_argument("--port", type=int, default=8765)
     trigger = commands.add_parser("trigger", help="send a safe synthetic scenario to the local dashboard server")
@@ -174,6 +180,11 @@ def main() -> None:
             raise SystemExit(f"Cannot reach local simulator at 127.0.0.1:{args.port}: {exc}") from exc
         finally:
             connection.close()
+    elif args.command == "live-validate":
+        from .live_validation import LiveValidator, write_report
+        result = LiveValidator().run_all(skip_trust_recovery=args.skip_trust_recovery)
+        if result.get("status") != "preflight-failed":
+            result["result_file"] = str(write_report(result, Path(args.output_dir)))
     elif args.command == "boundary":
         result = run_boundary_sweep(tuple(args.sizes))
     elif args.command == "experiment":

@@ -36,7 +36,11 @@ Single-sensor scenario results from `experiment`: the distributed model has 0% f
 
 - Byzantine replicas only withhold or refuse. Equivocation is not modeled beyond the assumption that k >= 2f+1 attackers can commit on their own (PBFT gives no guarantee beyond f).
 - The compromised set always includes the initial primary (worst case for liveness).
-- Not yet run on a real cluster; see `docs/KUBERNETES.md`.
+- Everything above is a modeled tick on synthetic evidence, run in-process with no real cluster, network, or attacker involved.
+
+## Live cluster measurements
+
+`python -m resilience.cli live-validate` (see "Live validation" in `docs/KUBERNETES.md`) replaces the modeled ticks above with real wall-clock measurements — actual isolate/restore timing and the full trust-recovery climb — against a running Minikube deployment. It has not yet been run against a live cluster; do that next and fold the resulting `work/live-results/*.json` numbers into this document once available.
 
 ## Dashboard and Prometheus/Grafana
 
